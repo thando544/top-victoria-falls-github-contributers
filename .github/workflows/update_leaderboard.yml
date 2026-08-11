@@ -1,0 +1,52 @@
+name: Update Leaderboard
+
+on:
+  schedule:
+    # Every Sunday at midnight UTC
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-leaderboard
+  cancel-in-progress: true
+
+jobs:
+  update:
+    name: Fetch users & update README
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch Victoria Falls GitHub users
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SORT_BY: followers
+        run: python fetch_users.py
+
+      - name: Commit and push README changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet README.md; then
+            echo "No leaderboard changes to commit."
+            exit 0
+          fi
+
+          git add README.md
+          git commit -m "chore: update Victoria Falls GitHub leaderboard [skip ci]"
+          git push
