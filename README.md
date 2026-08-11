@@ -82,35 +82,3 @@ Local developers can join the leaderboard in under a minute:
 5. Wait for the next weekly refresh (Sunday, 00:00 UTC), or ask a maintainer to run the workflow manually.
 
 Tip: spelling matters. The search looks for an exact location match against those two phrases.
-
----
-
-## How it works
-
-| Piece | Role |
-| --- | --- |
-| `fetch_users.py` | Queries GitHub, ranks users, injects Markdown between the README markers |
-| `.github/workflows/update_leaderboard.yml` | Runs every Sunday at midnight UTC (and on demand) |
-| `requirements.txt` | Pinned Python dependencies |
-
-Sorting is controlled by the `SORT_BY` environment variable:
-
-- `followers` (default)
-- `repos`
-- `contributions` — composite score: `(repos × 10) + (gists × 2) + followers`
-
-### Local run
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-export GITHUB_TOKEN=ghp_your_token_here
-python fetch_users.py
-```
-
----
-
-## License
-
-This project is provided as-is for community visibility. Profile data comes from the public GitHub API and remains owned by the respective users.
