@@ -29,6 +29,7 @@ SEARCH_QUERIES = (
     'location:"Vic Falls"',
 )
 README_PATH = "README.md"
+INDEX_PATH = "index.html"
 START_MARKER = "<!-- START_LEADERBOARD -->"
 END_MARKER = "<!-- END_LEADERBOARD -->"
 AVATAR_WIDTH = 40
@@ -356,6 +357,153 @@ def update_readme(leaderboard_md: str, path: str = README_PATH) -> None:
     logger.info("Updated %s", path)
 
 
+def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    metric_label = {
+        "followers": "followers",
+        "repos": "public repositories",
+        "contributions": "contribution score",
+    }[sort_by]
+
+    rows: list[str] = []
+    if users:
+        for rank, user in enumerate(users, start=1):
+            avatar = (
+                f'<img class="avatar" src="{html.escape(user.avatar_url, quote=True)}" '
+                f'width="{AVATAR_WIDTH}" height="{AVATAR_WIDTH}" '
+                f'alt="{html.escape(user.login)}">'
+                if user.avatar_url
+                else ""
+            )
+            name_html = (
+                f'<div class="name">{html.escape(user.name)}</div>' if user.name else ""
+            )
+            bio = html.escape(truncate_bio(user.bio))
+            rows.append(
+                "        <tr>\n"
+                f"          <td class=\"rank\">{rank}</td>\n"
+                f"          <td>{avatar}</td>\n"
+                "          <td>\n"
+                f'            <a class="login" href="{html.escape(user.html_url, quote=True)}">'
+                f"{html.escape(user.login)}</a>\n"
+                f"            {name_html}\n"
+                "          </td>\n"
+                f"          <td class=\"num\">{user.followers}</td>\n"
+                f"          <td class=\"num\">{user.public_repos}</td>\n"
+                f"          <td class=\"bio\">{bio}</td>\n"
+                f'          <td><a class="btn" href="{html.escape(user.html_url, quote=True)}">Open</a></td>\n'
+                "        </tr>"
+            )
+        table_body = "\n".join(rows)
+        table = f"""    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Avatar</th>
+            <th>Username</th>
+            <th>Followers</th>
+            <th>Repos</th>
+            <th>Bio</th>
+            <th>Profile</th>
+          </tr>
+        </thead>
+        <tbody>
+{table_body}
+        </tbody>
+      </table>
+    </div>"""
+    else:
+        table = (
+            '    <p class="empty">No developers currently list Victoria Falls or Vic Falls '
+            "in their GitHub profile location.</p>"
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Top Active GitHub Users in Victoria Falls, Zimbabwe</title>
+  <meta name="description" content="Leaderboard of the most active GitHub developers in Victoria Falls (Vic Falls), Zimbabwe. Ranked by public followers and updated weekly.">
+  <style>
+    :root {{
+      --bg: #07140f;
+      --panel: #0f241c;
+      --ink: #e8f5ee;
+      --muted: #9cb5a8;
+      --line: #1e3d31;
+      --accent: #2d8c6e;
+      --accent-2: #c9a227;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      background: radial-gradient(1200px 500px at 10% -10%, #143528 0%, var(--bg) 55%);
+      color: var(--ink);
+      line-height: 1.5;
+    }}
+    .wrap {{ max-width: 1080px; margin: 0 auto; padding: 48px 20px 80px; }}
+    h1 {{ font-size: clamp(1.8rem, 4vw, 2.6rem); margin: 0 0 8px; }}
+    .lede {{ color: var(--muted); max-width: 720px; }}
+    .meta {{ color: var(--accent-2); font-size: 0.92rem; margin: 24px 0; }}
+    .table-wrap {{
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+    }}
+    table {{ width: 100%; border-collapse: collapse; min-width: 720px; }}
+    th, td {{ padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }}
+    th {{ font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .rank, .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+    .avatar {{ border-radius: 50%; display: block; }}
+    .login {{ color: #7ee0bc; text-decoration: none; font-weight: 650; }}
+    .name {{ color: var(--muted); font-size: 0.85rem; }}
+    .bio {{ color: var(--muted); max-width: 280px; }}
+    .btn {{
+      display: inline-block;
+      color: var(--bg);
+      background: var(--accent);
+      text-decoration: none;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 650;
+    }}
+    .how {{ margin-top: 48px; color: var(--muted); }}
+    .how a {{ color: #7ee0bc; }}
+    .empty {{ color: var(--muted); }}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>Top Active GitHub Users in Victoria Falls</h1>
+    <p class="lede">An automated leaderboard of open-source developers who list Victoria Falls or Vic Falls on their GitHub profile. Ranked by {html.escape(metric_label)}.</p>
+    <p class="meta">Last updated: {html.escape(now)} · {len(users)} developer(s)</p>
+{table}
+    <section class="how">
+      <h2>How to appear on this list</h2>
+      <ol>
+        <li>Open your <a href="https://github.com/settings/profile">GitHub profile settings</a>.</li>
+        <li>Set <strong>Location</strong> to <code>Victoria Falls</code> or <code>Vic Falls</code>.</li>
+        <li>This page refreshes every Sunday.</li>
+      </ol>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+def write_index(users: list[GitHubUser], sort_by: SortKey, path: str = INDEX_PATH) -> None:
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(render_html_page(users, sort_by))
+    logger.info("Updated %s", path)
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
@@ -380,6 +528,7 @@ def main() -> int:
         ranked = sort_users(users, sort_by=sort_by)
         leaderboard = render_leaderboard(ranked, sort_by=sort_by)
         update_readme(leaderboard)
+        write_index(ranked, sort_by=sort_by)
         logger.info("Leaderboard ready: %d developer(s).", len(ranked))
     finally:
         client.close()

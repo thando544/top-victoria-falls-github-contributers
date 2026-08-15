@@ -42,11 +42,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet README.md; then
+          if git diff --quiet README.md index.html; then
             echo "No leaderboard changes to commit."
             exit 0
           fi
 
-          git add README.md
+          git add README.md index.html
           git commit -m "chore: update Victoria Falls GitHub leaderboard [skip ci]"
           git push
