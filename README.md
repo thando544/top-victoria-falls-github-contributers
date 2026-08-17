@@ -82,4 +82,6 @@ Local developers can join the leaderboard in under a minute:
 4. Optionally add a short **bio** and keep your avatar public — both appear on the table.
 5. Wait up to 30 minutes for the next refresh, or run **Update Leaderboard** from the Actions tab.
 
+Contributions are public GitHub activity from the last 12 months (the same total shown on a profile).
+
 Tip: spelling matters. The search looks for an exact location match against those two phrases.

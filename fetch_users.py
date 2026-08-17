@@ -13,7 +13,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Literal
 
@@ -24,6 +24,7 @@ import requests
 # ---------------------------------------------------------------------------
 
 GITHUB_API = "https://api.github.com"
+GITHUB_GRAPHQL = "https://api.github.com/graphql"
 SEARCH_QUERIES = (
     'location:"Victoria Falls"',
     'location:"Vic Falls"',
@@ -66,11 +67,7 @@ class GitHubUser:
     followers: int
     public_repos: int
     public_gists: int
-
-    @property
-    def contributions_score(self) -> int:
-        """Proxy contribution metric: repos weighted higher than gists, plus followers."""
-        return (self.public_repos * 10) + (self.public_gists * 2) + self.followers
+    contributions: int = 0
 
     @classmethod
     def from_api(cls, payload: dict[str, Any]) -> GitHubUser:
@@ -84,6 +81,7 @@ class GitHubUser:
             followers=int(payload.get("followers") or 0),
             public_repos=int(payload.get("public_repos") or 0),
             public_gists=int(payload.get("public_gists") or 0),
+            contributions=int(payload.get("contributions") or 0),
         )
 
 
@@ -172,6 +170,68 @@ class GitHubClient:
 
         raise SystemExit(f"Failed after {MAX_RETRIES} retries: {last_error}")
 
+    def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        last_error: Exception | None = None
+        payload = {"query": query, "variables": variables or {}}
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = self.session.post(GITHUB_GRAPHQL, json=payload, timeout=REQUEST_TIMEOUT)
+            except requests.RequestException as exc:
+                last_error = exc
+                sleep_for = min(2**attempt, 60)
+                logger.warning(
+                    "GraphQL request failed (%s). Retry %d/%d in %ds…",
+                    exc,
+                    attempt,
+                    MAX_RETRIES,
+                    sleep_for,
+                )
+                time.sleep(sleep_for)
+                continue
+
+            if response.status_code == 401:
+                logger.warning("GraphQL needs a GITHUB_TOKEN — contribution counts will be 0.")
+                return {}
+
+            if response.status_code == 403 and self._is_rate_limited(response):
+                reset_at = response.headers.get("X-RateLimit-Reset")
+                wait = self._seconds_until_reset(reset_at)
+                logger.warning(
+                    "GraphQL rate limited. Waiting %ds before retry %d/%d…",
+                    wait,
+                    attempt,
+                    MAX_RETRIES,
+                )
+                time.sleep(wait)
+                continue
+
+            if response.status_code >= 500:
+                sleep_for = min(2**attempt, 60)
+                logger.warning(
+                    "GraphQL server error %s. Retry %d/%d in %ds…",
+                    response.status_code,
+                    attempt,
+                    MAX_RETRIES,
+                    sleep_for,
+                )
+                time.sleep(sleep_for)
+                continue
+
+            try:
+                response.raise_for_status()
+                body = response.json()
+            except (requests.HTTPError, ValueError) as exc:
+                logger.error("GraphQL error: %s", exc)
+                return {}
+
+            if body.get("errors"):
+                logger.warning("GraphQL returned errors: %s", body["errors"][:2])
+            return body if isinstance(body, dict) else {}
+
+        logger.error("GraphQL failed after %d retries: %s", MAX_RETRIES, last_error)
+        return {}
+
     @staticmethod
     def _is_rate_limited(response: requests.Response) -> bool:
         remaining = response.headers.get("X-RateLimit-Remaining")
@@ -246,6 +306,42 @@ def fetch_user_details(client: GitHubClient, logins: Iterable[str]) -> list[GitH
     return users
 
 
+CONTRIBUTIONS_QUERY = """
+query($login: String!) {
+  user(login: $login) {
+    contributionsCollection {
+      contributionCalendar {
+        totalContributions
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_contributions(client: GitHubClient, users: list[GitHubUser]) -> list[GitHubUser]:
+    """Fill in last-12-months public contribution totals from the GraphQL API."""
+    if "Authorization" not in client.session.headers:
+        logger.warning("Skipping contributions — set GITHUB_TOKEN to fetch totals.")
+        return users
+
+    updated: list[GitHubUser] = []
+    for user in users:
+        logger.info("Fetching contributions: %s", user.login)
+        payload = client.graphql(CONTRIBUTIONS_QUERY, {"login": user.login})
+        total = 0
+        try:
+            total = int(
+                payload["data"]["user"]["contributionsCollection"]["contributionCalendar"][
+                    "totalContributions"
+                ]
+            )
+        except (TypeError, KeyError, ValueError):
+            logger.warning("No contribution total for %s — using 0.", user.login)
+        updated.append(replace(user, contributions=total))
+    return updated
+
+
 # ---------------------------------------------------------------------------
 # Sorting & rendering
 # ---------------------------------------------------------------------------
@@ -254,13 +350,17 @@ def fetch_user_details(client: GitHubClient, logins: Iterable[str]) -> list[GitH
 SORT_KEY_FNS: dict[SortKey, Callable[[GitHubUser], int]] = {
     "followers": lambda u: u.followers,
     "repos": lambda u: u.public_repos,
-    "contributions": lambda u: u.contributions_score,
+    "contributions": lambda u: u.contributions,
 }
 
 
 def sort_users(users: list[GitHubUser], sort_by: SortKey = DEFAULT_SORT) -> list[GitHubUser]:
     key_fn = SORT_KEY_FNS[sort_by]
-    return sorted(users, key=lambda u: (key_fn(u), u.followers, u.public_repos), reverse=True)
+    return sorted(
+        users,
+        key=lambda u: (key_fn(u), u.contributions, u.followers, u.public_repos),
+        reverse=True,
+    )
 
 
 def truncate_bio(bio: str | None, max_len: int = BIO_MAX_LEN) -> str:
@@ -282,7 +382,7 @@ def render_leaderboard(users: list[GitHubUser], sort_by: SortKey) -> str:
     metric_label = {
         "followers": "followers",
         "repos": "public repositories",
-        "contributions": "contribution score (repos × 10 + gists × 2 + followers)",
+        "contributions": "contributions (last 12 months)",
     }[sort_by]
 
     lines: list[str] = [
@@ -302,8 +402,8 @@ def render_leaderboard(users: list[GitHubUser], sort_by: SortKey) -> str:
 
     lines.extend(
         [
-            "| Rank | Avatar | Username | Followers | Repos | Bio | Profile |",
-            "| :---: | :---: | --- | ---: | ---: | --- | --- |",
+            "| Rank | Avatar | Username | Followers | Repos | Contributions | Bio | Profile |",
+            "| :---: | :---: | --- | ---: | ---: | ---: | --- | --- |",
         ]
     )
 
@@ -324,7 +424,7 @@ def render_leaderboard(users: list[GitHubUser], sort_by: SortKey) -> str:
 
         lines.append(
             f"| {rank} | {avatar} | {username} | {user.followers} | "
-            f"{user.public_repos} | {bio} | {profile} |"
+            f"{user.public_repos} | {user.contributions} | {bio} | {profile} |"
         )
 
     lines.append("")
@@ -362,7 +462,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
     metric_label = {
         "followers": "followers",
         "repos": "public repositories",
-        "contributions": "contribution score",
+        "contributions": "contributions (last 12 months)",
     }[sort_by]
 
     rows: list[str] = []
@@ -390,6 +490,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
                 "          </td>\n"
                 f"          <td class=\"num\">{user.followers}</td>\n"
                 f"          <td class=\"num\">{user.public_repos}</td>\n"
+                f"          <td class=\"num\">{user.contributions}</td>\n"
                 f"          <td class=\"bio\">{bio}</td>\n"
                 f'          <td><a class="btn" href="{html.escape(user.html_url, quote=True)}">Open</a></td>\n'
                 "        </tr>"
@@ -404,6 +505,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
             <th>Username</th>
             <th>Followers</th>
             <th>Repos</th>
+            <th>Contributions</th>
             <th>Bio</th>
             <th>Profile</th>
           </tr>
@@ -489,7 +591,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
       <ol>
         <li>Open your <a href="https://github.com/settings/profile">GitHub profile settings</a>.</li>
         <li>Set <strong>Location</strong> to <code>Victoria Falls</code> or <code>Vic Falls</code>.</li>
-        <li>This page refreshes every 30 minutes.</li>
+        <li>This page refreshes every 30 minutes. Contributions are GitHub activity from the last 12 months.</li>
       </ol>
     </section>
   </main>
@@ -525,6 +627,8 @@ def main() -> int:
     try:
         logins = search_user_logins(client)
         users = fetch_user_details(client, logins) if logins else []
+        if users:
+            users = fetch_contributions(client, users)
         ranked = sort_users(users, sort_by=sort_by)
         leaderboard = render_leaderboard(ranked, sort_by=sort_by)
         update_readme(leaderboard)
