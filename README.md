@@ -2,13 +2,13 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Location-Victoria%20Falls%2C%20Zimbabwe-0B3D2E?style=for-the-badge" alt="Victoria Falls, Zimbabwe"/>
-  <img src="https://img.shields.io/badge/Updated-Daily-1B6B4A?style=for-the-badge" alt="Updated daily"/>
+  <img src="https://img.shields.io/badge/Updated-Every%2030%20min-1B6B4A?style=for-the-badge" alt="Updated every 30 minutes"/>
   <img src="https://img.shields.io/badge/Data-GitHub%20Search%20API-2D8C6E?style=for-the-badge" alt="GitHub Search API"/>
 </p>
 
 <p align="center">
   <strong>An automated leaderboard of open-source developers who call Victoria Falls home.</strong><br/>
-  Ranked by public followers, refreshed every day via GitHub Actions.
+  Ranked by public followers, refreshed every 30 minutes via GitHub Actions.
 </p>
 
 ---
@@ -80,6 +80,6 @@ Local developers can join the leaderboard in under a minute:
    - `Victoria Falls`
    - `Vic Falls`
 4. Optionally add a short **bio** and keep your avatar public — both appear on the table.
-5. Wait for the next daily refresh (00:00 UTC), or run **Update Leaderboard** from the Actions tab.
+5. Wait up to 30 minutes for the next refresh, or run **Update Leaderboard** from the Actions tab.
 
 Tip: spelling matters. The search looks for an exact location match against those two phrases.

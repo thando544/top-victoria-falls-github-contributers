@@ -425,7 +425,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Top Active GitHub Users in Victoria Falls, Zimbabwe</title>
-  <meta name="description" content="Leaderboard of the most active GitHub developers in Victoria Falls (Vic Falls), Zimbabwe. Ranked by public followers and updated daily.">
+  <meta name="description" content="Leaderboard of the most active GitHub developers in Victoria Falls (Vic Falls), Zimbabwe. Ranked by public followers and updated every 30 minutes.">
   <style>
     :root {{
       --bg: #07140f;
@@ -489,7 +489,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
       <ol>
         <li>Open your <a href="https://github.com/settings/profile">GitHub profile settings</a>.</li>
         <li>Set <strong>Location</strong> to <code>Victoria Falls</code> or <code>Vic Falls</code>.</li>
-        <li>This page refreshes every day at midnight UTC.</li>
+        <li>This page refreshes every 30 minutes.</li>
       </ol>
     </section>
   </main>
