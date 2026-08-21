@@ -42,6 +42,8 @@ USER_AGENT = "vic-falls-github-leaderboard/1.0"
 
 SortKey = Literal["followers", "repos", "contributions"]
 DEFAULT_SORT: SortKey = "followers"
+CONTRIBUTION_YEAR = datetime.now(timezone.utc).year
+GRAPHQL_BATCH_SIZE = 20
 
 logging.basicConfig(
     level=logging.INFO,
@@ -306,40 +308,139 @@ def fetch_user_details(client: GitHubClient, logins: Iterable[str]) -> list[GitH
     return users
 
 
-CONTRIBUTIONS_QUERY = """
-query($login: String!) {
-  user(login: $login) {
-    contributionsCollection {
-      contributionCalendar {
-        totalContributions
-      }
-    }
-  }
-}
-"""
+def _year_bounds(year: int) -> tuple[str, str]:
+    """Return ISO-8601 from/to for a full calendar year (UTC)."""
+    return f"{year}-01-01T00:00:00Z", f"{year}-12-31T23:59:59Z"
 
 
-def fetch_contributions(client: GitHubClient, users: list[GitHubUser]) -> list[GitHubUser]:
-    """Fill in last-12-months public contribution totals from the GraphQL API."""
-    if "Authorization" not in client.session.headers:
-        logger.warning("Skipping contributions — set GITHUB_TOKEN to fetch totals.")
-        return users
+def _parse_contribution_total(html_text: str) -> int | None:
+    """Extract a contribution total from a GitHub contributions page HTML."""
+    match = re.search(
+        r"([0-9][0-9,]*)\s+contributions?\s+in\s+[0-9]{4}",
+        html_text,
+        re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(
+            r"([0-9][0-9,]*)\s+contributions?\s+this\s+year",
+            html_text,
+            re.IGNORECASE,
+        )
+    if not match:
+        return None
+    try:
+        return int(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
 
+
+def fetch_contributions_public(
+    client: GitHubClient,
+    users: list[GitHubUser],
+    *,
+    year: int = CONTRIBUTION_YEAR,
+) -> list[GitHubUser]:
+    """Fallback: scrape public contribution pages when GraphQL is unavailable."""
     updated: list[GitHubUser] = []
     for user in users:
-        logger.info("Fetching contributions: %s", user.login)
-        payload = client.graphql(CONTRIBUTIONS_QUERY, {"login": user.login})
+        logger.info("Fetching public contributions page: %s (%d)", user.login, year)
         total = 0
         try:
-            total = int(
-                payload["data"]["user"]["contributionsCollection"]["contributionCalendar"][
-                    "totalContributions"
-                ]
+            response = client.session.get(
+                f"https://github.com/users/{user.login}/contributions",
+                params={"from": f"{year}-01-01", "to": f"{year}-12-31"},
+                timeout=REQUEST_TIMEOUT,
+                headers={"Accept": "text/html"},
             )
-        except (TypeError, KeyError, ValueError):
-            logger.warning("No contribution total for %s — using 0.", user.login)
+            if response.ok:
+                parsed = _parse_contribution_total(response.text)
+                if parsed is not None:
+                    total = parsed
+                else:
+                    logger.warning("Could not parse contributions for %s", user.login)
+            else:
+                logger.warning(
+                    "Contributions page HTTP %s for %s",
+                    response.status_code,
+                    user.login,
+                )
+        except requests.RequestException as exc:
+            logger.warning("Contributions page failed for %s: %s", user.login, exc)
         updated.append(replace(user, contributions=total))
+        time.sleep(0.4)
     return updated
+
+
+def fetch_contributions(
+    client: GitHubClient,
+    users: list[GitHubUser],
+    *,
+    year: int = CONTRIBUTION_YEAR,
+) -> list[GitHubUser]:
+    """Fill in calendar-year public contribution totals."""
+    if "Authorization" in client.session.headers:
+        return fetch_contributions_graphql(client, users, year=year)
+    logger.warning("No GITHUB_TOKEN — using public contributions pages.")
+    return fetch_contributions_public(client, users, year=year)
+
+
+def fetch_contributions_graphql(
+    client: GitHubClient,
+    users: list[GitHubUser],
+    *,
+    year: int = CONTRIBUTION_YEAR,
+) -> list[GitHubUser]:
+    """Fill in calendar-year totals from the GraphQL API."""
+    from_iso, to_iso = _year_bounds(year)
+    totals: dict[str, int] = {}
+
+    for start in range(0, len(users), GRAPHQL_BATCH_SIZE):
+        batch = users[start : start + GRAPHQL_BATCH_SIZE]
+        fields: list[str] = []
+        variables: dict[str, Any] = {"from": from_iso, "to": to_iso}
+        var_defs = ["$from: DateTime!", "$to: DateTime!"]
+
+        for index, user in enumerate(batch):
+            alias = f"u{index}"
+            var_name = f"login{index}"
+            var_defs.append(f"${var_name}: String!")
+            variables[var_name] = user.login
+            fields.append(
+                f"{alias}: user(login: ${var_name}) {{\n"
+                "  login\n"
+                "  contributionsCollection(from: $from, to: $to) {\n"
+                "    contributionCalendar { totalContributions }\n"
+                "  }\n"
+                "}"
+            )
+
+        query = "query(" + ", ".join(var_defs) + ") {\n" + "\n".join(fields) + "\n}"
+        logger.info(
+            "Fetching %d contribution totals for %d users (%d–%d)…",
+            year,
+            len(batch),
+            start + 1,
+            start + len(batch),
+        )
+        payload = client.graphql(query, variables)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            logger.warning("GraphQL batch returned no data — contribution totals may be 0.")
+            continue
+
+        for index, user in enumerate(batch):
+            node = data.get(f"u{index}") or {}
+            try:
+                totals[user.login] = int(
+                    node["contributionsCollection"]["contributionCalendar"][
+                        "totalContributions"
+                    ]
+                )
+            except (TypeError, KeyError, ValueError):
+                logger.warning("No %d contribution total for %s — using 0.", year, user.login)
+                totals[user.login] = 0
+
+    return [replace(user, contributions=totals.get(user.login, 0)) for user in users]
 
 
 # ---------------------------------------------------------------------------
@@ -379,14 +480,16 @@ def escape_md_cell(text: str) -> str:
 
 def render_leaderboard(users: list[GitHubUser], sort_by: SortKey) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    year = CONTRIBUTION_YEAR
     metric_label = {
         "followers": "followers",
         "repos": "public repositories",
-        "contributions": "contributions (last 12 months)",
+        "contributions": f"{year} contributions",
     }[sort_by]
 
     lines: list[str] = [
-        f"_Last updated: **{now}** · Sorted by **{metric_label}**_",
+        f"_Last updated: **{now}** · Sorted by **{metric_label}** · "
+        f"Contributions = public GitHub activity in **{year}**_",
         "",
     ]
 
@@ -402,7 +505,7 @@ def render_leaderboard(users: list[GitHubUser], sort_by: SortKey) -> str:
 
     lines.extend(
         [
-            "| Rank | Avatar | Username | Followers | Repos | Contributions | Bio | Profile |",
+            f"| Rank | Avatar | Username | Followers | Repos | Contributions ({year}) | Bio | Profile |",
             "| :---: | :---: | --- | ---: | ---: | ---: | --- | --- |",
         ]
     )
@@ -459,10 +562,11 @@ def update_readme(leaderboard_md: str, path: str = README_PATH) -> None:
 
 def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    year = CONTRIBUTION_YEAR
     metric_label = {
         "followers": "followers",
         "repos": "public repositories",
-        "contributions": "contributions (last 12 months)",
+        "contributions": f"{year} contributions",
     }[sort_by]
 
     rows: list[str] = []
@@ -505,7 +609,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
             <th>Username</th>
             <th>Followers</th>
             <th>Repos</th>
-            <th>Contributions</th>
+            <th>Contributions ({year})</th>
             <th>Bio</th>
             <th>Profile</th>
           </tr>
@@ -527,7 +631,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Top Active GitHub Users in Victoria Falls, Zimbabwe</title>
-  <meta name="description" content="Leaderboard of the most active GitHub developers in Victoria Falls (Vic Falls), Zimbabwe. Ranked by public followers and updated every 30 minutes.">
+  <meta name="description" content="Leaderboard of the most active GitHub developers in Victoria Falls (Vic Falls), Zimbabwe. Shows followers, repos, and {year} contribution totals. Updated daily.">
   <style>
     :root {{
       --bg: #07140f;
@@ -546,7 +650,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
       color: var(--ink);
       line-height: 1.5;
     }}
-    .wrap {{ max-width: 1080px; margin: 0 auto; padding: 48px 20px 80px; }}
+    .wrap {{ max-width: 1100px; margin: 0 auto; padding: 48px 20px 80px; }}
     h1 {{ font-size: clamp(1.8rem, 4vw, 2.6rem); margin: 0 0 8px; }}
     .lede {{ color: var(--muted); max-width: 720px; }}
     .meta {{ color: var(--accent-2); font-size: 0.92rem; margin: 24px 0; }}
@@ -556,7 +660,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
       border-radius: 16px;
       background: var(--panel);
     }}
-    table {{ width: 100%; border-collapse: collapse; min-width: 720px; }}
+    table {{ width: 100%; border-collapse: collapse; min-width: 820px; }}
     th, td {{ padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }}
     th {{ font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }}
     tr:last-child td {{ border-bottom: 0; }}
@@ -564,7 +668,7 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
     .avatar {{ border-radius: 50%; display: block; }}
     .login {{ color: #7ee0bc; text-decoration: none; font-weight: 650; }}
     .name {{ color: var(--muted); font-size: 0.85rem; }}
-    .bio {{ color: var(--muted); max-width: 280px; }}
+    .bio {{ color: var(--muted); max-width: 260px; }}
     .btn {{
       display: inline-block;
       color: var(--bg);
@@ -583,15 +687,15 @@ def render_html_page(users: list[GitHubUser], sort_by: SortKey) -> str:
 <body>
   <main class="wrap">
     <h1>Top Active GitHub Users in Victoria Falls</h1>
-    <p class="lede">An automated leaderboard of open-source developers who list Victoria Falls or Vic Falls on their GitHub profile. Ranked by {html.escape(metric_label)}.</p>
-    <p class="meta">Last updated: {html.escape(now)} · {len(users)} developer(s)</p>
+    <p class="lede">An automated leaderboard of open-source developers who list Victoria Falls or Vic Falls on their GitHub profile. Ranked by {html.escape(metric_label)}. The contributions column is each user’s public GitHub activity in {year}.</p>
+    <p class="meta">Last updated: {html.escape(now)} · {len(users)} developer(s) · Contributions year: {year}</p>
 {table}
     <section class="how">
       <h2>How to appear on this list</h2>
       <ol>
         <li>Open your <a href="https://github.com/settings/profile">GitHub profile settings</a>.</li>
         <li>Set <strong>Location</strong> to <code>Victoria Falls</code> or <code>Vic Falls</code>.</li>
-        <li>This page refreshes every 30 minutes. Contributions are GitHub activity from the last 12 months.</li>
+        <li>This page refreshes once a day.</li>
       </ol>
     </section>
   </main>

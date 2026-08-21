@@ -2,8 +2,8 @@ name: Update Leaderboard
 
 on:
   schedule:
-    # Every 30 minutes
-    - cron: "*/30 * * * *"
+    # Once a day at midnight UTC (avoids burning free Actions minutes)
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:
